@@ -43,3 +43,9 @@ yarn-error.log*
 
 # OS metadata
 .DS_Store
+
+# Persistent runtime data
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

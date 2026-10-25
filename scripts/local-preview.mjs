@@ -2,11 +2,13 @@
 // Uses the real React component and API handlers with SQLite and the starter's mock auth.
 import {createServer} from 'node:http';
 import {AsyncLocalStorage} from 'node:async_hooks';
+import {Readable} from 'node:stream';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
 import {build} from 'rolldown';
-import ts from 'typescript';
 import {sites} from './vite/sites-vite-plugin.ts';
+import {compilePreviewApi} from './compile-preview-api.mjs';
+import {localBucket} from './local-bucket.mjs';
 
 mkdirSync('.sites-runtime', {recursive:true});
 writeFileSync('.sites-runtime/preview-entry.tsx', "import React from 'react'; import {createRoot} from 'react-dom/client'; import Messenger from '../app/messenger'; createRoot(document.getElementById('root')!).render(<Messenger/>);");
@@ -38,13 +40,9 @@ const database = {prepare(sql) {
   catch(error) {sqlite.exec('ROLLBACK'); throw error;}
 }};
 const context = new AsyncLocalStorage();
-globalThis.__deepiPreview = {database, context};
-writeFileSync('.sites-runtime/preview-context.mjs', `export const env={DB:globalThis.__deepiPreview.database}; export async function getChatGPTUser(){const headers=globalThis.__deepiPreview.context.getStore(); const userId=headers['oai-authenticated-user-id']; return userId ? {userId,email:headers['oai-authenticated-user-email']} : null;}`);
-const identity = readFileSync('app/api/chat/identity.ts','utf8');
-writeFileSync('.sites-runtime/preview-identity.mjs', ts.transpileModule(identity,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
-const route = readFileSync('app/api/chat/route.ts','utf8').replace("'cloudflare:workers'", "'./preview-context.mjs'").replace("'../../chatgpt-auth'", "'./preview-context.mjs'").replace("'./identity'", "'./preview-identity.mjs'");
-writeFileSync('.sites-runtime/preview-api.mjs', ts.transpileModule(route,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
-const {GET,POST} = await import('../.sites-runtime/preview-api.mjs');
+globalThis.__deepiPreview = {database, context, bucket:localBucket('.sites-runtime/uploads')};
+const modules=compilePreviewApi('preview-api',`export const env={DB:globalThis.__deepiPreview.database,BUCKET:globalThis.__deepiPreview.bucket}; export async function getChatGPTUser(){const headers=globalThis.__deepiPreview.context.getStore(); const userId=headers['oai-authenticated-user-id']; return userId ? {userId,email:headers['oai-authenticated-user-email']} : null;}`);
+const chat = await import(modules.chat), media = await import(modules.media);
 const middleware = [];
 const mockAuth = sites({mockAuth:true});
 mockAuth.configureServer({config:{server:{},logger:console},middlewares:{use(fn){middleware.push(fn);}}});
@@ -58,12 +56,15 @@ const server = createServer(async (request, response) => {
     context.run(request.headers, async () => {
       try {
         const url = new URL(request.url,'http://' + request.headers.host);
-        if (url.pathname === '/api/chat') {
-          let body = '';
-          for await (const chunk of request) {body += chunk; if (body.length > 24000) {response.writeHead(413); response.end(); return;}}
-          const req = new Request(url, {method:request.method,headers:request.headers,...(body ? {body} : {})});
-          const result = request.method === 'POST' ? await POST(req) : await GET(req);
-          response.writeHead(result.status,Object.fromEntries(result.headers)); response.end(await result.text()); return;
+        if (url.pathname === '/api/chat' || url.pathname === '/api/media') {
+          const handler = (url.pathname === '/api/chat' ? chat : media)[request.method];
+          if (!handler) {response.writeHead(405);response.end();return;}
+          const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
+          const req = new Request(url, {method:request.method,headers:request.headers,...(hasBody ? {body:Readable.toWeb(request),duplex:'half'} : {})});
+          const result = await handler(req);
+          response.writeHead(result.status,Object.fromEntries(result.headers));
+          if (result.body) Readable.fromWeb(result.body).pipe(response); else response.end();
+          return;
         }
         const assets = {'/app.css':['text/css',css],'/app.js':['text/javascript',readFileSync('.sites-runtime/preview-app.js')],'/favicon.svg':['image/svg+xml',readFileSync('public/favicon.svg')]};
         if (assets[url.pathname]) {response.writeHead(200,{'Content-Type':assets[url.pathname][0]}); response.end(assets[url.pathname][1]);return;}
