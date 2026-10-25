@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792955681914,
+      "tag": "0000_messenger",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792956776204,
+      "tag": "0001_saved_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792956776205,
+      "tag": "0002_permanent_ids",
+      "breakpoints": true
+    }
+  ]
+}
